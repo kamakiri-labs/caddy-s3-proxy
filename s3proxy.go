@@ -336,6 +336,7 @@ func (p S3Proxy) writeResponseFromGetObject(w http.ResponseWriter, obj *s3.GetOb
 
 	var err error
 	if obj.Body != nil {
+		defer obj.Body.Close()
 		// io.Copy will set Content-Length
 		w.Header().Del("Content-Length")
 		_, err = io.Copy(w, obj.Body)
@@ -417,6 +418,7 @@ func (p S3Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 			setStrHeader(w, "Content-Type", obj.ContentType)
 			w.WriteHeader(http.StatusNotFound)
 			if obj.Body != nil {
+				defer obj.Body.Close()
 				_, _ = io.Copy(w, obj.Body)
 			}
 			return nil
