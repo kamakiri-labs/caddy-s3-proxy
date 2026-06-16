@@ -20,8 +20,10 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	caddy "github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 )
@@ -236,6 +238,26 @@ func setupTestBucket(t *testing.T, client *s3.S3) string {
 	return bucketName
 }
 
+func boolPtr(b bool) *bool { return &b }
+
+// brokenS3Client returns an S3 client pointed at a closed port so any request
+// fails fast with a connection error, which the handler maps to a 500. Used to
+// exercise the "5xx does not trigger the not_found_page branch" case.
+func brokenS3Client() *s3.S3 {
+	sess, err := session.NewSession(&aws.Config{
+		Region:           aws.String("us-east-1"),
+		Endpoint:         aws.String("http://127.0.0.1:1"),
+		S3ForcePathStyle: aws.Bool(true),
+		MaxRetries:       aws.Int(0),
+		Credentials:      credentials.NewStaticCredentials("test", "test", ""),
+		HTTPClient:       &http.Client{Timeout: 2 * time.Second},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return s3.New(sess)
+}
+
 func TestProxy(t *testing.T) {
 	client := newS3Client(t)
 	bucketName := setupTestBucket(t, client)
@@ -247,10 +269,13 @@ func TestProxy(t *testing.T) {
 		body                 []byte
 		headers              http.Header
 		path                 string
+		next                 caddyhttp.Handler
+		clientOverride       *s3.S3
 		expectedCode         int
 		expectedHeaders      http.Header
 		expectedResponseText string
 		expectsEmptyResponse bool
+		expectReturnNil      *bool
 	}{
 		{
 			name:                 "can get simple JSON object",
@@ -370,6 +395,58 @@ func TestProxy(t *testing.T) {
 			expectedResponseText: `this is a default error page`,
 		},
 		{
+			name:                 "serves not_found_page with forced 404 for a missing key",
+			proxy:                S3Proxy{Bucket: bucketName, NotFoundPage: "404.html"},
+			method:               http.MethodGet,
+			path:                 "/doesnt-exist",
+			expectedCode:         http.StatusNotFound,
+			expectedResponseText: `<!doctype html><title>Not found</title><h1>site custom 404 page</h1>`,
+			expectedHeaders: http.Header{
+				"Content-Type": []string{"text/html; charset=utf-8"},
+			},
+			expectReturnNil: boolPtr(true),
+		},
+		{
+			// A directory with browsing disabled triggers a 403; the not_found_page
+			// must still be served with a forced 404 (status forced, not echoed).
+			name:                 "forces 404 for a 403 trigger when not_found_page is set",
+			proxy:                S3Proxy{Bucket: bucketName, NotFoundPage: "404.html"},
+			method:               http.MethodGet,
+			path:                 "/inner/",
+			expectedCode:         http.StatusNotFound,
+			expectedResponseText: `<!doctype html><title>Not found</title><h1>site custom 404 page</h1>`,
+			expectReturnNil:      boolPtr(true),
+		},
+		{
+			// not_found_page is set but the page itself is missing: fall through to
+			// the next handler (the platform's branded default). The stub writes a
+			// distinct status (418) so the assertion also proves the handler wrote
+			// nothing to the response before delegating - next owns status + body.
+			name:   "falls through to next when not_found_page is missing",
+			proxy:  S3Proxy{Bucket: bucketName, NotFoundPage: "no-such-404.html"},
+			method: http.MethodGet,
+			path:   "/doesnt-exist",
+			next: caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				w.WriteHeader(http.StatusTeapot)
+				_, _ = w.Write([]byte("branded fallback"))
+				return nil
+			}),
+			expectedCode:         http.StatusTeapot,
+			expectedResponseText: `branded fallback`,
+		},
+		{
+			// A 5xx (here, an unreachable backend) must not trigger the branch; the
+			// original status propagates.
+			name:                 "does not serve not_found_page for a 5xx",
+			proxy:                S3Proxy{Bucket: bucketName, NotFoundPage: "404.html"},
+			clientOverride:       brokenS3Client(),
+			method:               http.MethodGet,
+			path:                 "/doesnt-exist",
+			expectedCode:         http.StatusInternalServerError,
+			expectsEmptyResponse: true,
+			expectReturnNil:      boolPtr(false),
+		},
+		{
 			name:   "returns range",
 			proxy:  S3Proxy{Bucket: bucketName},
 			method: http.MethodGet,
@@ -486,10 +563,14 @@ func TestProxy(t *testing.T) {
 
 			recorder := httptest.NewRecorder()
 
-			tc.proxy.client = client
+			if tc.clientOverride != nil {
+				tc.proxy.client = tc.clientOverride
+			} else {
+				tc.proxy.client = client
+			}
 			tc.proxy.log = zap.NewExample()
 
-			_ = tc.proxy.ServeHTTP(recorder, req, nil)
+			gotErr := tc.proxy.ServeHTTP(recorder, req, tc.next)
 
 			// Check HTTP status code
 			if tc.expectedCode != 0 && recorder.Code != tc.expectedCode {
@@ -516,6 +597,18 @@ func TestProxy(t *testing.T) {
 			// Check if response should be empty
 			if tc.expectsEmptyResponse && recorder.Body.Len() != 0 {
 				t.Errorf("Expected response body to be empty, got %s.", recorder.Body.String())
+			}
+
+			// Check the handler's return value when the case cares about it.
+			// A nil return after a full write is what keeps the body intact
+			// through a buffering cache.
+			if tc.expectReturnNil != nil {
+				if *tc.expectReturnNil && gotErr != nil {
+					t.Errorf("Expected ServeHTTP to return nil, got %v.", gotErr)
+				}
+				if !*tc.expectReturnNil && gotErr == nil {
+					t.Errorf("Expected ServeHTTP to return a non-nil error, got nil.")
+				}
 			}
 		})
 	}

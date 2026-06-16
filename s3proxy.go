@@ -71,6 +71,11 @@ type S3Proxy struct {
 	// S3 key to a default error page or pass through option.
 	DefaultErrorPage string `json:"default_error_page,omitempty"`
 
+	// S3 key (resolved against Root) served with a forced 404 for a not-found-class
+	// status. Empty disables the behavior. If the key is absent or unreadable the
+	// request falls through to the next handler.
+	NotFoundPage string `json:"not_found_page,omitempty"`
+
 	// Set this to `true` to force the request to use path-style addressing.
 	S3ForcePathStyle bool `json:"force_path_style,omitempty"`
 
@@ -164,6 +169,7 @@ func (p *S3Proxy) Provision(ctx caddy.Context) (err error) {
 		zap.Bool("enable_put", p.EnablePut),
 		zap.Bool("enable_delete", p.EnableDelete),
 		zap.String("default_error_page", p.DefaultErrorPage),
+		zap.String("not_found_page", p.NotFoundPage),
 		zap.Bool("enable_browse", p.EnableBrowse),
 		zap.Bool("force_path_style", p.S3ForcePathStyle),
 		zap.Bool("use_accelerate", p.S3UseAccelerate),
@@ -393,6 +399,29 @@ func (p S3Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		caddyErr.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		w.WriteHeader(caddyErr.StatusCode)
 		return caddyErr
+	}
+
+	// Serve the site's own not-found page (the GitHub Pages 404.html convention) for a
+	// not-found-class status, with a forced 404 that survives a buffering cache. Both
+	// 404 (NoSuchKey, e.g. MinIO) and 403 (AccessDenied, which Sakura Object Storage
+	// returns for a missing key) count as not-found. The status is written once,
+	// before the body; returning nil rather than the handler error is
+	// what keeps the body intact through a proxy that buffers the response (a non-nil
+	// return after a full write is read as a failed response and the body is dropped).
+	// If the page itself is missing or unreadable, delegate to the next handler so the
+	// platform's branded default is served.
+	if p.NotFoundPage != "" &&
+		(caddyErr.StatusCode == http.StatusNotFound || caddyErr.StatusCode == http.StatusForbidden) {
+		key := path.Join(repl.ReplaceAll(p.Root, ""), p.NotFoundPage)
+		if obj, gerr := p.getS3Object(p.Bucket, key, nil); gerr == nil {
+			setStrHeader(w, "Content-Type", obj.ContentType)
+			w.WriteHeader(http.StatusNotFound)
+			if obj.Body != nil {
+				_, _ = io.Copy(w, obj.Body)
+			}
+			return nil
+		}
+		return next.ServeHTTP(w, r)
 	}
 
 	// process errors directive

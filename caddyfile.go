@@ -28,6 +28,7 @@ func init() {
 //        force_path_style
 //        use_accelerate
 //        errors [<http code>] [<s3 key to error page>|pass_through]
+//        not_found_page <s3 key, resolved against root>
 //        browse [<template file>]
 //    }
 //
@@ -111,6 +112,10 @@ parseLoop:
 
 				b.ErrorPages[httpStatus] = s3KeyOrPassThrough
 			} else {
+				return nil, h.ArgErr()
+			}
+		case "not_found_page":
+			if !h.AllArgs(&b.NotFoundPage) {
 				return nil, h.ArgErr()
 			}
 		default:

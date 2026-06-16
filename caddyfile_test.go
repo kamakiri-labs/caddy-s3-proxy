@@ -189,6 +189,27 @@ func TestParseCaddyfile(t *testing.T) {
 			shouldErr: true,
 			errString: "Testfile:3 - Error during parsing: Wrong argument count or unexpected line ending after 'index'",
 		},
+		testCase{
+			desc: "not_found_page gets set",
+			input: `s3proxy {
+				bucket mybucket
+				not_found_page 404.html
+			}`,
+			shouldErr: false,
+			obj: S3Proxy{
+				Bucket:       "mybucket",
+				NotFoundPage: "404.html",
+			},
+		},
+		testCase{
+			desc: "not_found_page - missing arg",
+			input: `s3proxy {
+				bucket mybucket
+				not_found_page
+			}`,
+			shouldErr: true,
+			errString: "Testfile:3 - Error during parsing: Wrong argument count or unexpected line ending after 'not_found_page'",
+		},
 	}
 
 	for _, tc := range testCases {

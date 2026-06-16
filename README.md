@@ -40,6 +40,7 @@ The Caddyfile directive would look something like this:
  		force_path_style
 		errors <http status> <S3 key to a custom error page for this http status>
 		errors <S3 key to a default error page>
+		not_found_page <S3 key to the site's own 404 page, resolved against root>
 		browse [<path to template>]
 	}
 ```
@@ -57,6 +58,7 @@ The Caddyfile directive would look something like this:
 | force_path_style    | bool     | no  | false   | Set this to `true` to force S3 request to use path-style addressing |
 | use_accelerate      | bool     | no  | false   | Set this to `true` to enable S3 Accelerate feature |
 | errors              | [int, ] string | no |  | Custom error page or use "pass_through" to write nothing for errors. |
+| not_found_page      | string   | no |  | S3 key (resolved against root) served with a forced 404 for a not-found (404/403) status; falls through to the next handler if the page is missing. |
 | browse              | [string] | no |  | Turns on a directory view for partial keys, an optional path to a template can be given |
 
 ## Credentials
